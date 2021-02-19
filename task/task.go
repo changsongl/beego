@@ -17,19 +17,11 @@ package task
 import (
 	"context"
 	"log"
-	"math"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
+	//"github.com/robfig/cron/v3"
 )
-
-// bounds provides a range of acceptable values (plus a map of name to value).
-type bounds struct {
-	min, max uint
-	names    map[string]uint
-}
 
 type taskManager struct {
 	adminTaskList map[string]Tasker
@@ -49,37 +41,8 @@ func newTaskManager() *taskManager {
 	}
 }
 
-// The bounds for each field.
 var (
 	globalTaskManager *taskManager
-
-	seconds = bounds{0, 59, nil}
-	minutes = bounds{0, 59, nil}
-	hours   = bounds{0, 23, nil}
-	days    = bounds{1, 31, nil}
-	months  = bounds{1, 12, map[string]uint{
-		"jan": 1,
-		"feb": 2,
-		"mar": 3,
-		"apr": 4,
-		"may": 5,
-		"jun": 6,
-		"jul": 7,
-		"aug": 8,
-		"sep": 9,
-		"oct": 10,
-		"nov": 11,
-		"dec": 12,
-	}}
-	weeks = bounds{0, 6, map[string]uint{
-		"sun": 0,
-		"mon": 1,
-		"tue": 2,
-		"wed": 3,
-		"thu": 4,
-		"fri": 5,
-		"sat": 6,
-	}}
 )
 
 const (
@@ -268,26 +231,8 @@ func (t *Task) parse(spec string) *Schedule {
 	if len(spec) > 0 && spec[0] == '@' {
 		return t.parseSpec(spec)
 	}
-	// Split on whitespace.  We require 5 or 6 fields.
-	// (second) (minute) (hour) (day of month) (month) (day of week, optional)
-	fields := strings.Fields(spec)
-	if len(fields) != 5 && len(fields) != 6 {
-		log.Panicf("Expected 5 or 6 fields, found %d: %s", len(fields), spec)
-	}
 
-	// If a sixth field is not provided (DayOfWeek), then it is equivalent to star.
-	if len(fields) == 5 {
-		fields = append(fields, "*")
-	}
-
-	schedule := &Schedule{
-		Second: getField(fields[0], seconds),
-		Minute: getField(fields[1], minutes),
-		Hour:   getField(fields[2], hours),
-		Day:    getField(fields[3], days),
-		Month:  getField(fields[4], months),
-		Week:   getField(fields[5], weeks),
-	}
+	schedule := &Schedule{}
 
 	return schedule
 }
@@ -295,57 +240,19 @@ func (t *Task) parse(spec string) *Schedule {
 func (t *Task) parseSpec(spec string) *Schedule {
 	switch spec {
 	case "@yearly", "@annually":
-		return &Schedule{
-			Second: 1 << seconds.min,
-			Minute: 1 << minutes.min,
-			Hour:   1 << hours.min,
-			Day:    1 << days.min,
-			Month:  1 << months.min,
-			Week:   all(weeks),
-		}
-
+		t.SpecStr = "0 0 0 1 1 *"
 	case "@monthly":
-		return &Schedule{
-			Second: 1 << seconds.min,
-			Minute: 1 << minutes.min,
-			Hour:   1 << hours.min,
-			Day:    1 << days.min,
-			Month:  all(months),
-			Week:   all(weeks),
-		}
-
+		t.SpecStr = "0 0 0 1 * *"
 	case "@weekly":
-		return &Schedule{
-			Second: 1 << seconds.min,
-			Minute: 1 << minutes.min,
-			Hour:   1 << hours.min,
-			Day:    all(days),
-			Month:  all(months),
-			Week:   1 << weeks.min,
-		}
-
+		t.SpecStr = "0 0 0 * * 0"
 	case "@daily", "@midnight":
-		return &Schedule{
-			Second: 1 << seconds.min,
-			Minute: 1 << minutes.min,
-			Hour:   1 << hours.min,
-			Day:    all(days),
-			Month:  all(months),
-			Week:   all(weeks),
-		}
-
+		t.SpecStr = "0 0 0 * * *"
 	case "@hourly":
-		return &Schedule{
-			Second: 1 << seconds.min,
-			Minute: 1 << minutes.min,
-			Hour:   all(hours),
-			Day:    all(days),
-			Month:  all(months),
-			Week:   all(weeks),
-		}
+		t.SpecStr = "0 0 * * * *"
+	default:
+		log.Panicf("Unrecognized descriptor: %s", spec)
 	}
-	log.Panicf("Unrecognized descriptor: %s", spec)
-	return nil
+	return &Schedule{}
 }
 
 // Next set schedule to next time
@@ -673,115 +580,6 @@ func (ms *MapSorter) Less(i, j int) bool {
 func (ms *MapSorter) Swap(i, j int) {
 	ms.Vals[i], ms.Vals[j] = ms.Vals[j], ms.Vals[i]
 	ms.Keys[i], ms.Keys[j] = ms.Keys[j], ms.Keys[i]
-}
-
-func getField(field string, r bounds) uint64 {
-	// list = range {"," range}
-	var bits uint64
-	ranges := strings.FieldsFunc(field, func(r rune) bool { return r == ',' })
-	for _, expr := range ranges {
-		bits |= getRange(expr, r)
-	}
-	return bits
-}
-
-// getRange returns the bits indicated by the given expression:
-//   number | number "-" number [ "/" number ]
-func getRange(expr string, r bounds) uint64 {
-
-	var (
-		start, end, step uint
-		rangeAndStep     = strings.Split(expr, "/")
-		lowAndHigh       = strings.Split(rangeAndStep[0], "-")
-		singleDigit      = len(lowAndHigh) == 1
-	)
-
-	var extrastar uint64
-	if lowAndHigh[0] == "*" || lowAndHigh[0] == "?" {
-		start = r.min
-		end = r.max
-		extrastar = starBit
-	} else {
-		start = parseIntOrName(lowAndHigh[0], r.names)
-		switch len(lowAndHigh) {
-		case 1:
-			end = start
-		case 2:
-			end = parseIntOrName(lowAndHigh[1], r.names)
-		default:
-			log.Panicf("Too many hyphens: %s", expr)
-		}
-	}
-
-	switch len(rangeAndStep) {
-	case 1:
-		step = 1
-	case 2:
-		step = mustParseInt(rangeAndStep[1])
-
-		// Special handling: "N/step" means "N-max/step".
-		if singleDigit {
-			end = r.max
-		}
-	default:
-		log.Panicf("Too many slashes: %s", expr)
-	}
-
-	if start < r.min {
-		log.Panicf("Beginning of range (%d) below minimum (%d): %s", start, r.min, expr)
-	}
-	if end > r.max {
-		log.Panicf("End of range (%d) above maximum (%d): %s", end, r.max, expr)
-	}
-	if start > end {
-		log.Panicf("Beginning of range (%d) beyond end of range (%d): %s", start, end, expr)
-	}
-
-	return getBits(start, end, step) | extrastar
-}
-
-// parseIntOrName returns the (possibly-named) integer contained in expr.
-func parseIntOrName(expr string, names map[string]uint) uint {
-	if names != nil {
-		if namedInt, ok := names[strings.ToLower(expr)]; ok {
-			return namedInt
-		}
-	}
-	return mustParseInt(expr)
-}
-
-// mustParseInt parses the given expression as an int or panics.
-func mustParseInt(expr string) uint {
-	num, err := strconv.Atoi(expr)
-	if err != nil {
-		log.Panicf("Failed to parse int from %s: %s", expr, err)
-	}
-	if num < 0 {
-		log.Panicf("Negative number (%d) not allowed: %s", num, expr)
-	}
-
-	return uint(num)
-}
-
-// getBits sets all bits in the range [min, max], modulo the given step size.
-func getBits(min, max, step uint) uint64 {
-	var bits uint64
-
-	// If step is 1, use shifts.
-	if step == 1 {
-		return ^(math.MaxUint64 << (max + 1)) & (math.MaxUint64 << min)
-	}
-
-	// Else, use a simple loop.
-	for i := min; i <= max; i += step {
-		bits |= 1 << i
-	}
-	return bits
-}
-
-// all returns all bits within the given bounds.  (plus the star bit)
-func all(r bounds) uint64 {
-	return getBits(r.min, r.max, 1) | starBit
 }
 
 func init() {
