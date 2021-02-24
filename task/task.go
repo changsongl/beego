@@ -16,6 +16,7 @@ package task
 
 import (
 	"context"
+	"github.com/robfig/cron/v3"
 	"log"
 	"sort"
 	"sync"
@@ -95,6 +96,8 @@ type Task struct {
 	Errlist  []*taskerr    // like errtime:errinfo
 	ErrLimit int           // max length for the errlist, 0 stand for no limit
 	errCnt   int           // records the error count during the execution
+	c        *cron.Cron    // cron
+	id       cron.EntryID  // task id
 }
 
 // NewTask add new task with name, time and func
@@ -148,12 +151,15 @@ func (t *Task) Run(ctx context.Context) error {
 
 // SetNext set next time for this task
 func (t *Task) SetNext(ctx context.Context, now time.Time) {
-	t.Next = t.Spec.Next(now)
 }
 
 // GetNext get the next call time of this task
 func (t *Task) GetNext(context.Context) time.Time {
-	return t.Next
+	if t.c != nil {
+		return t.c.Entry(t.id).Next
+	}
+
+	return time.Time{}
 }
 
 // SetPrev set prev time of this task
@@ -257,87 +263,6 @@ func (t *Task) parseSpec(spec string) *Schedule {
 
 // Next set schedule to next time
 func (s *Schedule) Next(t time.Time) time.Time {
-
-	// Start at the earliest possible time (the upcoming second).
-	t = t.Add(1*time.Second - time.Duration(t.Nanosecond())*time.Nanosecond)
-
-	// This flag indicates whether a field has been incremented.
-	added := false
-
-	// If no time is found within five years, return zero.
-	yearLimit := t.Year() + 5
-
-WRAP:
-	if t.Year() > yearLimit {
-		return time.Time{}
-	}
-
-	// Find the first applicable month.
-	// If it's this month, then do nothing.
-	for 1<<uint(t.Month())&s.Month == 0 {
-		// If we have to add a month, reset the other parts to 0.
-		if !added {
-			added = true
-			// Otherwise, set the date at the beginning (since the current time is irrelevant).
-			t = time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location())
-		}
-		t = t.AddDate(0, 1, 0)
-
-		// Wrapped around.
-		if t.Month() == time.January {
-			goto WRAP
-		}
-	}
-
-	// Now get a day in that month.
-	for !dayMatches(s, t) {
-		if !added {
-			added = true
-			t = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
-		}
-		t = t.AddDate(0, 0, 1)
-
-		if t.Day() == 1 {
-			goto WRAP
-		}
-	}
-
-	for 1<<uint(t.Hour())&s.Hour == 0 {
-		if !added {
-			added = true
-			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, t.Location())
-		}
-		t = t.Add(1 * time.Hour)
-
-		if t.Hour() == 0 {
-			goto WRAP
-		}
-	}
-
-	for 1<<uint(t.Minute())&s.Minute == 0 {
-		if !added {
-			added = true
-			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), 0, 0, t.Location())
-		}
-		t = t.Add(1 * time.Minute)
-
-		if t.Minute() == 0 {
-			goto WRAP
-		}
-	}
-
-	for 1<<uint(t.Second())&s.Second == 0 {
-		if !added {
-			added = true
-			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, t.Location())
-		}
-		t = t.Add(1 * time.Second)
-
-		if t.Second() == 0 {
-			goto WRAP
-		}
-	}
-
 	return t
 }
 
@@ -395,7 +320,7 @@ func (m *taskManager) StartTask() {
 func (m *taskManager) run() {
 	now := time.Now().Local()
 	// first run the tasks, so set all tasks next run time.
-	m.setTasksStartTime(now)
+	//m.setTasksStartTime(now)
 
 	for {
 		// we only use RLock here because NewMapSorter copy the reference, do not change any thing
@@ -419,22 +344,13 @@ func (m *taskManager) run() {
 			continue
 		case <-m.changed: // tasks have been changed, set all tasks run again now
 			now = time.Now().Local()
-			m.setTasksStartTime(now)
+			//m.setTasksStartTime(now)
 			continue
 		case <-m.stop: // manager is stopped, and mark manager is stopped
 			m.markManagerStop()
 			return
 		}
 	}
-}
-
-// setTasksStartTime is set all tasks next running time
-func (m *taskManager) setTasksStartTime(now time.Time) {
-	m.taskLock.Lock()
-	for _, task := range m.adminTaskList {
-		task.SetNext(context.Background(), now)
-	}
-	m.taskLock.Unlock()
 }
 
 // markManagerStop it sets manager to be stopped
